@@ -1,5 +1,5 @@
 [Unit]
-Description=Kafka → ClickHouse Consumer (companies_by_system)
+Description=Kafka → ClickHouse Consumer (%i)
 After=network.target
 
 [Service]
@@ -7,12 +7,12 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/opt/kafka-pipeline/consumer
 EnvironmentFile=/opt/kafka-pipeline/consumer/.env
-ExecStart=/opt/kafka-pipeline/consumer/venv/bin/python consumer.py
+ExecStart=/opt/kafka-pipeline/consumer/venv/bin/python consumer.py --topic %i
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=kafka-consumer
+SyslogIdentifier=kafka-consumer-%i
 
 [Install]
 WantedBy=multi-user.target

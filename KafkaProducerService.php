@@ -4,85 +4,139 @@ namespace App\Services;
 
 use RdKafka\Conf;
 use RdKafka\Producer;
-use RdKafka\TopicConf;
 use Illuminate\Support\Facades\Log;
 
 class KafkaProducerService
 {
     private Producer $producer;
-    private \RdKafka\ProducerTopic $topic;
+
+    /** @var array<string, \RdKafka\ProducerTopic> */
+    private array $topicHandles = [];
 
     public function __construct()
     {
         $conf = new Conf();
+        $cfg  = config('kafka.producer');
 
-        $conf->set('metadata.broker.list', config('kafka.brokers'));
-        $conf->set('compression.type',     config('kafka.producer.compression.type', 'lz4'));
-        $conf->set('batch.num.messages',   config('kafka.producer.batch.num.messages', 1000));
-        $conf->set('queue.buffering.max.ms', config('kafka.producer.queue.buffering.max.ms', 50));
-        $conf->set('queue.buffering.max.messages', config('kafka.producer.queue.buffering.max.messages', 100000));
-        $conf->set('message.max.bytes',    config('kafka.producer.message.max.bytes', 10485760));
-        $conf->set('request.required.acks', config('kafka.producer.request.required.acks', -1));
-        $conf->set('retries',              config('kafka.producer.retries', 3));
+        $conf->set('metadata.broker.list',          config('kafka.brokers'));
+        $conf->set('compression.type',              $cfg['compression.type']);
+        $conf->set('batch.num.messages',            $cfg['batch.num.messages']);
+        $conf->set('queue.buffering.max.ms',        $cfg['queue.buffering.max.ms']);
+        $conf->set('queue.buffering.max.messages',  $cfg['queue.buffering.max.messages']);
+        $conf->set('message.max.bytes',             $cfg['message.max.bytes']);
+        $conf->set('request.required.acks',         $cfg['request.required.acks']);
+        $conf->set('retries',                       $cfg['retries']);
 
-        // Delivery report callback — logs errors
         $conf->setDrMsgCb(function ($kafka, $message) {
             if ($message->err) {
                 Log::error('[Kafka] Delivery failed', [
                     'error'   => rd_kafka_err2str($message->err),
-                    'payload' => $message->payload,
+                    'topic'   => $message->topic_name,
+                    'payload' => substr($message->payload, 0, 200),
                 ]);
             }
         });
 
         $this->producer = new Producer($conf);
-        $this->topic    = $this->producer->newTopic(config('kafka.topic'));
     }
 
     /**
-     * Produce a single company record.
+     * Send a single record for a named table config key.
      *
-     * @param  array  $record   Full row from pdb_companies_systemwise
-     * @param  string $action   'upsert' | 'delete'
+     * @param  string  $tableKey  Key in config('kafka.tables'), e.g. 'companies_systemwise'
+     * @param  array   $record    Raw MySQL row as array
+     * @param  string  $action    'upsert' | 'delete'
      */
-    public function sendCompany(array $record, string $action = 'upsert'): void
+    public function send(string $tableKey, array $record, string $action = 'upsert'): void
     {
+        $tableConfig = $this->getTableConfig($tableKey);
+
+        $mapped       = $this->applyFieldMap($record, $tableConfig);
+        $partitionKey = (string) ($record[$tableConfig['partition_key']] ?? '');
+
         $payload = json_encode([
-            'action'  => $action,
-            'payload' => $record,
+            'action'    => $action,
+            'table_key' => $tableKey,
+            'payload'   => $mapped,
         ]);
 
-        // Partition by company_id for ordering guarantees per company
-        $partitionKey = (string) ($record['company_id'] ?? $record['id'] ?? '');
+        $topic = $this->getTopic($tableConfig['topic']);
+        $topic->producev(RD_KAFKA_PARTITION_UA, 0, $payload, $partitionKey);
 
-        $this->topic->producev(
-            RD_KAFKA_PARTITION_UA,   // let librdkafka pick partition via key hash
-            0,                       // msgflags
-            $payload,
-            $partitionKey
-        );
-
-        $this->producer->poll(0);    // non-blocking poll to trigger callbacks
+        $this->producer->poll(0);
     }
 
     /**
-     * Produce a batch of company records.
+     * Send a batch of records for a named table config key.
      *
-     * @param  array  $records  Array of rows
-     * @param  string $action   'upsert' | 'delete'
+     * @param  string  $tableKey
+     * @param  array   $records   Array of raw MySQL rows
+     * @param  string  $action
      */
-    public function sendBatch(array $records, string $action = 'upsert'): void
+    public function sendBatch(string $tableKey, array $records, string $action = 'upsert'): void
     {
         foreach ($records as $record) {
-            $this->sendCompany($record, $action);
+            $this->send($tableKey, $record, $action);
         }
 
-        // Flush with 10-second timeout — ensures all messages are delivered
         $result = $this->producer->flush(10000);
 
         if (RD_KAFKA_RESP_ERR_NO_ERROR !== $result) {
-            Log::error('[Kafka] Flush incomplete', ['result' => $result]);
+            Log::error('[Kafka] Flush incomplete', [
+                'table_key' => $tableKey,
+                'result'    => $result,
+            ]);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    private function getTableConfig(string $tableKey): array
+    {
+        $config = config("kafka.tables.{$tableKey}");
+
+        if (!$config) {
+            throw new \InvalidArgumentException(
+                "[Kafka] No config found for table key: '{$tableKey}'. Add it to config/kafka.php"
+            );
+        }
+
+        return $config;
+    }
+
+    private function getTopic(string $topicName): \RdKafka\ProducerTopic
+    {
+        if (!isset($this->topicHandles[$topicName])) {
+            $this->topicHandles[$topicName] = $this->producer->newTopic($topicName);
+        }
+
+        return $this->topicHandles[$topicName];
+    }
+
+    /**
+     * Apply field_map and exclude_fields from config to a raw record.
+     */
+    private function applyFieldMap(array $record, array $tableConfig): array
+    {
+        $excludes = $tableConfig['exclude_fields'] ?? [];
+        $fieldMap = $tableConfig['field_map'] ?? [];
+
+        $result = [];
+
+        foreach ($record as $col => $value) {
+            // Skip excluded fields
+            if (in_array($col, $excludes, true)) {
+                continue;
+            }
+
+            // Rename if mapped, otherwise keep original name
+            $targetCol          = $fieldMap[$col] ?? $col;
+            $result[$targetCol] = $value;
+        }
+
+        return $result;
     }
 
     public function __destruct()

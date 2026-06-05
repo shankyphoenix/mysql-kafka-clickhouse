@@ -1,168 +1,160 @@
-# Kafka Pipeline — companies_systemwise → ClickHouse
+# Kafka Pipeline v2 — Multi-table
 
 ```
-MySQL (pdb_companies_systemwise)
-        │
-        │  Laravel Producer
-        │  (Observer or Artisan command)
-        ▼
-  Kafka  (16.58.103.76:9094)
-  topic: companies_systemwise
-        │
-        │  Python Consumer
-        │  batch flush: 1000 rows OR 5s
-        ▼
-  ClickHouse (companies_by_system)
-  ENGINE = ReplacingMergeTree(last_updated)
-```
-
----
-
-## 1. Kafka (Docker)
-
-### Start
-
-```bash
-cd kafka/
-docker compose up -d
-```
-
-### Create topic
-
-```bash
-chmod +x create_topic.sh
-./create_topic.sh
-```
-
-### Kafka UI
-
-Open `http://16.58.103.76:8080` in your browser.
-
-### Firewall (open required ports)
-
-```bash
-sudo ufw allow 9094/tcp   # Kafka external
-sudo ufw allow 8080/tcp   # Kafka UI (restrict to your IP in production)
+MySQL tables (any)
+      │
+      │  Laravel Producer
+      │  config/kafka.php  ← central map
+      ▼
+Kafka topics (one per table)
+      │
+      │  Python consumers (one process per topic)
+      │  config.py  ← central map
+      ▼
+ClickHouse tables (one per topic)
+ENGINE = ReplacingMergeTree
 ```
 
 ---
 
-## 2. Laravel Producer
+## Adding a new table (checklist)
 
-### Install php-rdkafka
-
-```bash
-# Ubuntu/Debian
-sudo apt-get install librdkafka-dev
-pecl install rdkafka
-echo "extension=rdkafka.so" >> /etc/php/8.x/cli/php.ini
-```
-
-### Copy files into your Laravel project
-
-```
-config/kafka.php                    → config/kafka.php
-KafkaProducerService.php            → app/Services/KafkaProducerService.php
-CompanySystemwiseObserver.php       → app/Observers/CompanySystemwiseObserver.php
-StreamCompaniesToKafka.php          → app/Console/Commands/StreamCompaniesToKafka.php
-```
-
-### Register the observer in AppServiceProvider
-
+### 1. config/kafka.php (Laravel)
+Add an entry to the `tables` array:
 ```php
-use App\Models\PdbCompanySystemwise;
-use App\Observers\CompanySystemwiseObserver;
+'your_table' => [
+    'mysql_table'    => 'your_mysql_table',
+    'topic'          => 'your_topic',
+    'partition_key'  => 'record_hash2',       // or whatever uniquely IDs a record
+    'order_by'       => ['col1', 'col2'],      // must match CH ORDER BY
+    'exclude_fields' => ['sensitive_col'],
+    'field_map'      => ['old_name' => 'new_name'],
+],
+```
 
-public function boot(): void
-{
-    PdbCompanySystemwise::observe(CompanySystemwiseObserver::class);
+### 2. config.py (Python consumer)
+Add a `_coerce_your_table(r)` function and an entry in `PIPELINES`:
+```python
+def _coerce_your_table(r: dict) -> list:
+    return [
+        _int(r.get("id")),
+        _str(r.get("name")),
+        # ... one entry per column
+    ]
+
+PIPELINES["your_topic"] = {
+    "clickhouse_table": "your_ch_table",
+    "field_map": {},
+    "columns": ["id", "name", ...],
+    "coerce": _coerce_your_table,
 }
 ```
 
-### Add to .env
+### 3. kafka/create_topics.sh
+Add the topic name to the `TOPICS` array, then run the script.
 
+### 4. Register the observer in Laravel
+```php
+// In AppServiceProvider::boot()
+YourModel::observe(KafkaModelObserver::class);
 ```
-KAFKA_BROKERS=16.58.103.76:9094
-KAFKA_TOPIC=companies_systemwise
+And set `$kafkaTableKey` on the model:
+```php
+class YourModel extends Model
+{
+    public string $kafkaTableKey = 'your_table';
+}
 ```
 
-### Initial full sync (one-time backfill)
-
+### 5. Start a consumer process
 ```bash
-php artisan kafka:stream-companies
-```
+# Manually
+python consumer.py --topic your_topic
 
-### Incremental sync (e.g. from a scheduled job)
-
-```bash
-php artisan kafka:stream-companies --since="2024-06-01 00:00:00"
+# As a systemd service
+sudo systemctl enable kafka-consumer@your_topic
+sudo systemctl start kafka-consumer@your_topic
 ```
 
 ---
 
-## 3. Python Consumer
+## Setup
 
-### Setup
+### Kafka
+```bash
+cd kafka/
+docker compose up -d
+chmod +x create_topics.sh && ./create_topics.sh
+```
 
+### Laravel Producer
+Copy files into your project:
+```
+config/kafka.php                          → config/kafka.php
+Services/KafkaProducerService.php         → app/Services/KafkaProducerService.php
+Services/KafkaModelObserver.php           → app/Observers/KafkaModelObserver.php
+Console/Commands/StreamTableToKafka.php   → app/Console/Commands/StreamTableToKafka.php
+```
+
+Register in `AppServiceProvider::boot()`:
+```php
+use App\Models\PdbCompanySystemwise;
+use App\Observers\KafkaModelObserver;
+
+PdbCompanySystemwise::observe(KafkaModelObserver::class);
+// PdbContact::observe(KafkaModelObserver::class);
+```
+
+Add to `.env`:
+```
+KAFKA_BROKERS=16.58.103.76:9094
+KAFKA_TOPIC=companies_systemwise   # not needed anymore but harmless
+```
+
+Backfill / incremental stream:
+```bash
+php artisan kafka:stream companies_systemwise
+php artisan kafka:stream contacts --since="2024-06-01 00:00:00"
+php artisan kafka:stream --all
+```
+
+### Python Consumer
 ```bash
 cd consumer/
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Edit .env — set CLICKHOUSE_* vars
+# Edit .env — fill in CLICKHOUSE_* values
 ```
 
-### Run manually
-
+Run consumers:
 ```bash
-source venv/bin/activate
-python consumer.py
+python consumer.py --topic companies_systemwise
+python consumer.py --topic contacts
 ```
 
-### Run as systemd service (production)
-
+As systemd services (parameterized template — one unit file, multiple instances):
 ```bash
-sudo cp kafka-consumer.service /etc/systemd/system/
+sudo cp kafka-consumer@.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable kafka-consumer
-sudo systemctl start kafka-consumer
-sudo journalctl -u kafka-consumer -f
+
+sudo systemctl enable kafka-consumer@companies_systemwise
+sudo systemctl enable kafka-consumer@contacts
+sudo systemctl start kafka-consumer@companies_systemwise
+sudo systemctl start kafka-consumer@contacts
+
+# Logs
+sudo journalctl -u kafka-consumer@companies_systemwise -f
+sudo journalctl -u kafka-consumer@contacts -f
 ```
 
 ---
 
-## 4. ClickHouse upsert notes
+## ClickHouse upsert notes
 
-`ReplacingMergeTree(last_updated)` deduplicates rows sharing the same ORDER BY key:
-
-```sql
-ORDER BY (
-    coalesce(system_id, 0),
-    coalesce(system_unique_id, 0),
-    coalesce(company_type, ''),
-    coalesce(service_type, ''),
-    coalesce(table_name, '')
-)
-```
-
-- **Deduplication happens on merge**, not immediately on insert.
-- For queries that need fully deduplicated results right now:
+- `ReplacingMergeTree(last_updated)` keeps the row with the **highest `last_updated`** per ORDER BY key.
+- Deduplication happens on background merge — use `FINAL` for immediate consistency:
   ```sql
-  SELECT * FROM companies_by_system FINAL WHERE ...;
+  SELECT * FROM companies_by_system FINAL WHERE system_id = 1;
   ```
-- To force a merge (use sparingly — expensive on large tables):
-  ```sql
-  OPTIMIZE TABLE companies_by_system FINAL;
-  ```
-
----
-
-## 5. Tuning
-
-| Parameter | Default | Notes |
-|---|---|---|
-| `BATCH_SIZE` | 1000 | Increase to 5000+ for high throughput |
-| `BATCH_TIMEOUT_SECS` | 5 | Decrease for lower latency |
-| Kafka partitions | 4 | Scale consumer instances = partition count |
-| `KAFKA_GROUP_ID` | fixed | Change to reset offsets to earliest |
