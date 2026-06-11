@@ -7,8 +7,14 @@ PARTITIONS=4
 REPLICATION=1
 
 TOPICS=(
-  "companies_systemwise"
+  "companies_by_system"
   "distributors"
+  "leads"
+  "sales"
+  "quotes"
+  "inventories"
+  "pdb_companies"
+  "notes"
   # Add new topics here
 )
 

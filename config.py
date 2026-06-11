@@ -9,25 +9,26 @@ To add a new table:
 3. Start a new consumer process: python consumer.py --topic <topic>
 """
 
+import json
 from datetime import datetime
-from typing import Optional, Any
+from typing import Optional
 
-
-# ---------------------------------------------------------------------------
-# Shared type coercion helpers
-# ---------------------------------------------------------------------------
+_EPOCH = datetime(1970, 1, 2)
+_MAX_DT = datetime(2106, 2, 7)
 
 def _dt(v) -> Optional[datetime]:
-    if v is None or v == "":
+    if v is None or v == "" or v == "0000-00-00 00:00:00" or v == "0000-00-00":
         return None
     if isinstance(v, datetime):
-        return v
+        return v if _EPOCH <= v <= _MAX_DT else None
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(str(v), fmt)
+            result = datetime.strptime(str(v), fmt)
+            return result if _EPOCH <= result <= _MAX_DT else None
         except ValueError:
             continue
     return None
+
 
 def _int(v) -> Optional[int]:
     try:
@@ -45,40 +46,82 @@ def _str(v) -> Optional[str]:
     if v is None:
         return None
     if isinstance(v, (dict, list)):
-        import json
         return json.dumps(v)
     return str(v)
 
-def _int_d(v, default=0) -> int:
-    return _int(v) if v is not None else default
+def _int_d(v, default: int = 0) -> int:
+    result = _int(v)
+    return result if result is not None else default
 
-def _str_d(v, default="") -> str:
-    return _str(v) if v is not None else default
+def _str_d(v, default: str = "") -> str:
+    result = _str(v)
+    return result if result is not None else default
 
 
 # ---------------------------------------------------------------------------
-# Pipeline definitions
-# ---------------------------------------------------------------------------
-# Each pipeline entry:
-#
-#   'topic_name': {
-#       'clickhouse_table': str,
-#
-#       'field_map': dict  (optional)
-#           Rename fields BEFORE coercion.
-#           { 'incoming_kafka_field': 'clickhouse_column_name' }
-#           Fields not in field_map are passed through as-is.
-#
-#       'columns': list[str]
-#           Ordered list of ClickHouse column names to insert.
-#
-#       'coerce': callable(dict) -> list
-#           Receives the (already field-mapped) payload dict.
-#           Returns an ordered list matching `columns`.
-#   }
+# Coerce functions — one per table, ordered to match `columns` list below
 # ---------------------------------------------------------------------------
 
-def _coerce_companies(r: dict) -> list:
+def _coerce_pdb_companies(r: dict) -> list:
+    return [
+        _int(r.get("id")),
+        _str_d(r.get("record_hash")),          # non-nullable (ORDER BY key)
+        _str(r.get("record_hash2")),
+        _str(r.get("record_hash3")),
+        _str_d(r.get("company_type")),
+        _str(r.get("name")),
+        _str(r.get("duns")),
+        _str(r.get("address")),
+        _str(r.get("phone_researched")),
+        _str(r.get("city")),
+        _str(r.get("state")),
+        _str(r.get("county")),
+        _str(r.get("country")),
+        _str(r.get("postal_code")),
+        _str(r.get("parent_name")),
+        _str(r.get("web_address")),
+        _float(r.get("dnb_sales_value")),
+        _str(r.get("dnb_trade_style")),
+        _str(r.get("sic")),
+        _str(r.get("naics")),
+        _str(r.get("latitude")),
+        _str(r.get("longitude")),
+        _str(r.get("line_of_business")),
+        _str(r.get("no_of_employees")),
+        _str(r.get("google_cust_name")),
+        _str(r.get("google_address")),
+        _str(r.get("google_city")),
+        _str(r.get("google_state")),
+        _str(r.get("google_country")),
+        _str(r.get("google_postal_code")),
+        _str(r.get("google_phone_researched")),
+        _str(r.get("google_web_address")),
+        _dt(r.get("last_updated")) or datetime.utcnow(),
+        _dt(r.get("last_updated_copy")) or datetime.utcnow(),
+        _int_d(r.get("system_count"), 0),
+        _str(r.get("system_ids")),
+        _str(r.get("system_names")),
+        _str(r.get("services")),
+        _str(r.get("sic_desc")),
+        _str(r.get("naics_desc")),
+        _str(r.get("meta")),
+        _float(r.get("total_sales")),
+        _float(r.get("total_cost")),
+        _int_d(r.get("in_cddb"), 0),
+        _int_d(r.get("is_cddb_client"), 0),
+        _str(r.get("interlynx_call_host")),
+        _str(r.get("interlynx_rep")),
+        _str(r.get("interlynx_am")),
+        _str(r.get("interlynx_company_type")),
+        _str_d(r.get("searched_on_google"), "No"),
+        _int_d(r.get("is_active"), 0),
+        _int_d(r.get("last_record_status"), 0),
+        _int_d(r.get("is_appended"), 1),
+        _str(r.get("meta_data")),
+    ]
+
+
+def _coerce_companies_systemwise(r: dict) -> list:
     return [
         _int(r.get("id")),
         _int(r.get("is_dedupe_global")),
@@ -92,11 +135,11 @@ def _coerce_companies(r: dict) -> list:
         _str(r.get("record_hash3")),
         _str(r.get("ils_unique_key")),
         _str(r.get("ils_unique_duns")),
-        _str(r.get("table_name")),
-        _str(r.get("service_type")),
-        _str(r.get("company_type")),
-        _int(r.get("system_id")),
-        _int(r.get("system_unique_id")),
+        _str_d(r.get("table_name")),           # non-nullable (ORDER BY key)
+        _str_d(r.get("service_type")),          # non-nullable (ORDER BY key)
+        _str_d(r.get("company_type")),          # non-nullable (ORDER BY key)
+        _int_d(r.get("system_id"), 0),          # non-nullable (ORDER BY key)
+        _int_d(r.get("system_unique_id"), 0),   # non-nullable (ORDER BY key)
         _str(r.get("system_name")),
         _str(r.get("client_specific_name")),
         _str(r.get("customer_unique_key")),
@@ -136,7 +179,7 @@ def _coerce_companies(r: dict) -> list:
         _str_d(r.get("deleted_tracker_id"), "0"),
         _float(r.get("total_sales")),
         _float(r.get("total_cost")),
-        _dt(r.get("date_added")),
+        _dt(r.get("date_added")) or datetime.utcnow(),  # non-nullable (version col)
         _dt(r.get("mapped_on")),
         _int(r.get("client_type")),
         _int(r.get("distributor_id")),
@@ -168,32 +211,425 @@ def _coerce_companies(r: dict) -> list:
     ]
 
 
-def _coerce_contacts(r: dict) -> list:
-    """
-    Example coerce function for a contacts table.
-    Adjust columns to match your actual ClickHouse contacts table.
-    """
+def _coerce_notes(r: dict) -> list:
     return [
         _int(r.get("id")),
-        _int(r.get("contact_id")),
-        _int(r.get("system_id")),
-        _str(r.get("customer_name")),   # remapped from cust_name via field_map
-        _str(r.get("email")),           # remapped from cust_email via field_map
-        _str(r.get("phone")),
-        _str(r.get("city")),
-        _str(r.get("state")),
-        _str(r.get("country")),
-        _dt(r.get("last_updated")) or datetime.utcnow(),
-        _dt(r.get("date_added")),
+        _str(r.get("services")),
+        _str(r.get("notes")),
+        _str(r.get("contacts")),
+        _int(r.get("company_id")),
+        _str(r.get("note_date")),
+        _str(r.get("submitted_by")),
+        _str(r.get("note_category")),
+        _str(r.get("tagged_systems")),
+        _str(r.get("tagged_note_category")),
+        _str_d(r.get("note_rating")),
+        _str(r.get("note_feedback_comment")),
+        _int_d(r.get("followup_note_id"), 0),
+        _str(r.get("followup_note_category")),
+        _str(r.get("followup_note_category_type")),
+        _str(r.get("followup_note_category_conference")),
+        _str(r.get("followup_note_category_referral")),
     ]
 
+
+def _coerce_leads(r: dict) -> list:
+    return [
+        _int(r.get("id")),
+        _int_d(r.get("system_id"), 0),          # non-nullable (ORDER BY key)
+        _int_d(r.get("system_unique_id"), 0),    # new — non-nullable (ORDER BY key)
+        _str(r.get("system_name")),
+        _str_d(r.get("company_type")),           # non-nullable (ORDER BY key)
+        _int(r.get("distributor_id")),
+        _int_d(r.get("rid"), 0),
+        _int_d(r.get("uid"), 0),
+        _int_d(r.get("cddb_unique_id"), 0),
+        _str(r.get("cddb_manager_name")),
+        _str(r.get("cddb_manager_email")),
+        _int_d(r.get("luid"), 0),
+        _str(r.get("status")),
+        _str(r.get("send_to_name")),
+        _str(r.get("send_to")),
+        _str(r.get("lead_type")),
+        _str(r.get("lead_type_show")),
+        _str(r.get("distributed_date")),
+        _str(r.get("county")),
+        _str(r.get("city")),
+        _str(r.get("state")),
+        _str(r.get("zip_code")),
+        _str(r.get("country")),
+        _str(r.get("region")),
+        _str(r.get("lead_source1")),
+        _str(r.get("lead_source2")),
+        _str(r.get("lead_source3")),
+        _str(r.get("lead_source4")),
+        _int_d(r.get("brand"), 0),
+        _int_d(r.get("assigned_brand"), 0),
+        _str(r.get("product")),
+        _int_d(r.get("assigned_product"), 0),
+        _str(r.get("market")),
+        _int_d(r.get("assigned_market"), 0),
+        _int(r.get("current_id")),
+        _str(r.get("closed_date")),
+        _str(r.get("closedate_mid")),
+        _str(r.get("forward_to")),
+        _str(r.get("forword_id")),
+        _str(r.get("forward_by_rid")),
+        _str(r.get("forward_by_uid")),
+        _str(r.get("order_amount")),
+        _str(r.get("order_desc")),
+        _str(r.get("post_reminder_date")),
+        _str(r.get("reminder_days")),
+        _int_d(r.get("reminder_cnt"), 0),
+        _str(r.get("reminder_date")),
+        _str(r.get("reminder_last_sent_date")),
+        _str(r.get("reminder_desc")),
+        _str(r.get("other_value")),
+        _str(r.get("no_pot_value")),
+        _str(r.get("lead_person_name")),
+        _str(r.get("forwarded_comments")),
+        _str(r.get("posted_comments")),
+        _str(r.get("open_reason")),
+        _str(r.get("lead_source_repr")),
+        _str(r.get("review_interlynx")),
+        _str(r.get("mscode")),
+        _str(r.get("stprod_code")),
+        _str(r.get("browser_name")),
+        _str(r.get("browser_version")),
+        _str(r.get("browser_platform")),
+        _str(r.get("server_ip")),
+        _str(r.get("system_ip")),
+        _str(r.get("mobile_posted")),
+        _str(r.get("quoted_amount")),
+        _dt(r.get("lead_date_time")),
+        _str(r.get("existing_customer")),
+        _str(r.get("new_costomer")),
+        _str(r.get("cust_type_other")),
+        _str(r.get("no_pot_competitor")),
+        _int(r.get("old_uid")),
+        _str(r.get("old_send_to")),
+        _str(r.get("received_date_time")),
+        _str(r.get("dont_know")),
+        _str(r.get("good_lead_value")),
+        _str(r.get("unable_to_reach_value")),
+        _str(r.get("not_my_lead_value")),
+        _str(r.get("not_mine_brand")),
+        _str(r.get("other_reason")),
+        _str(r.get("posted_reason")),
+        _str(r.get("annual_potential")),
+        _str(r.get("sic")),
+        _str(r.get("naics")),
+        _str(r.get("supplier_sent")),
+        _str(r.get("auto_sent")),
+        _str(r.get("send_lead_date_time")),
+        _str(r.get("first_post_date_time")),
+        _str(r.get("last_post_lead_date_time")),
+        _str(r.get("first_opend_date_time")),
+        _str(r.get("last_opend_date_time")),
+        _str(r.get("last_forward_lead_date_time")),
+        _str(r.get("uploaded_from")),
+        _str(r.get("direct_account")),
+        _str(r.get("forwarded_date")),
+        _str(r.get("remind_me_date_time")),
+        _str_d(r.get("lead_hash_key")),
+        _str(r.get("can_post")),
+        _str(r.get("demo_lead")),
+        _int(r.get("old_id")),
+        _int(r.get("csr_id")),
+        _str_d(r.get("flash_report"), "No"),
+        _int_d(r.get("tm_id"), 0),
+        _int_d(r.get("sub_status_id"), 0),
+        _str_d(r.get("mql_lead"), "No"),
+        _str_d(r.get("time_to_view"), "0"),
+        _str_d(r.get("time_to_close"), "0"),
+        _str_d(r.get("time_to_first_post"), "0"),
+        _str(r.get("brandname")),
+        _str(r.get("product_name")),
+        _str(r.get("market_name")),
+        _str(r.get("internal_market")),
+        _str(r.get("internal_sub_market")),
+        _str(r.get("sic_name")),
+        _str(r.get("sic_root")),
+        _str(r.get("sic_root_name")),
+        _str(r.get("sic_group")),
+        _str(r.get("sic_group_name")),
+        _str(r.get("naics_name")),
+        _str(r.get("naics_root")),
+        _str(r.get("naics_root_name")),
+        _str(r.get("naics_group")),
+        _str(r.get("naics_group_name")),
+        _str(r.get("status_name")),
+        _str(r.get("sub_status")),
+        _str(r.get("sources")),
+        _str(r.get("business_name")),
+        _str(r.get("address")),
+        _str(r.get("contact")),
+        _str(r.get("email")),
+        _str(r.get("webaddr")),
+        _str(r.get("phone")),
+        _str(r.get("phone_researched")),
+        _str(r.get("lat")),
+        _str(r.get("lon")),
+        _str(r.get("assigned_manager_name")),
+        _str(r.get("customer_type")),
+        _str(r.get("lead_comments")),
+        _str(r.get("posted_comments_2")),
+        _dt(r.get("forwarded_date_2")),
+        _dt(r.get("lead_date")),
+        _float(r.get("order_amount_2")),
+        _float(r.get("quote_amount")),
+        _str(r.get("lead_hash")),
+        _dt(r.get("created_at")) or datetime.utcnow(),
+        _dt(r.get("updated_at")) or datetime.utcnow(),  # non-nullable (version col)
+    ]
+
+
+def _coerce_pos_sales(r: dict) -> list:
+    return [
+        _int(r.get("id")),
+        _str_d(r.get("company_type")),          # non-nullable (ORDER BY key)
+        _int_d(r.get("system_id"), 0),          # non-nullable (ORDER BY key)
+        _int_d(r.get("system_unique_id"), 0),   # new — non-nullable (ORDER BY key)
+        _str(r.get("system_name")),
+        _int(r.get("uid")),
+        _int(r.get("distributor_id")),
+        _int_d(r.get("temp_distributor_id"), 0),
+        _str(r.get("cust_unique_key")),
+        _int(r.get("cddb_unique_id")),
+        _str(r.get("cddb_manager_name")),
+        _str(r.get("cddb_manager_email")),
+        _str(r.get("dist_account_number")),
+        _str(r.get("invoice_number")),
+        _str(r.get("invoice_date")),
+        _str(r.get("cust_account_number")),
+        _float(r.get("quantity")),
+        _float(r.get("total_sales_value")),
+        _float(r.get("total_cost_value")),
+        _str(r.get("part_number_actual")),
+        _int(r.get("year")),
+        _str(r.get("month")),
+        _str(r.get("part_number")),
+        _str(r.get("toplevel_family_1")),
+        _str(r.get("toplevel_family_2")),
+        _str(r.get("toplevel_family_3")),
+        _str(r.get("toplevel_family_4")),
+        _int(r.get("product_id")),
+        _str(r.get("brand")),
+        _str(r.get("part_number_submitted")),
+        _str(r.get("branch")),
+        _str(r.get("sic")),
+        _str(r.get("naics")),
+        _str(r.get("country")),
+        _str(r.get("region")),
+        _str(r.get("pos_batch_id")),
+        _dt(r.get("date_upload")),
+        _int_d(r.get("is_rebated"), 0),
+        _str_d(r.get("date_recieved")),
+        _str(r.get("cust_duns_id")),
+        _float(r.get("unit_cost")),
+        _float(r.get("unit_resale")),
+        _str(r.get("provided_customer_nbr")),
+        _str(r.get("sales_unique_key")),
+        _str(r.get("fix")),
+        _str(r.get("part_updated_date")),
+        _str(r.get("sales_rep")),
+        _str(r.get("csv_name")),
+        _str(r.get("uom")),
+        _str(r.get("match_criteria")),
+        _str(r.get("ship_to_commission")),
+        _str(r.get("ship_to_unit_price")),
+        _str(r.get("ship_to_unit_cost")),
+        _str(r.get("ship_to_pct")),
+        _str(r.get("unit_cost_original")),
+        _str(r.get("quantity_original")),
+        _str(r.get("prod_group")),
+        _str(r.get("territory_number")),
+        _str(r.get("tmid")),
+        _str(r.get("brand_name")),
+        _str(r.get("product_name")),
+        _str(r.get("sic_name")),
+        _str(r.get("naics_name")),
+        _str(r.get("sic_group")),
+        _str(r.get("sic_root")),
+        _str(r.get("naics_group")),
+        _str(r.get("naics_root")),
+        _str(r.get("sic_text")),
+        _str(r.get("sic_market_name")),
+        _str(r.get("sic_root_name")),
+        _str(r.get("naics_text")),
+        _str(r.get("naics_market_name")),
+        _str(r.get("naics_root_name")),
+        _str(r.get("assigned_manager_company")),
+        _str(r.get("assigned_manager_name")),
+        _str(r.get("customer_name")),
+        _str(r.get("address1")),
+        _str(r.get("city")),
+        _str(r.get("state")),
+        _str(r.get("county")),
+        _str(r.get("zip")),
+        _str(r.get("phone")),
+        _str(r.get("web_address")),
+        _str(r.get("line_of_business")),
+        _str(r.get("parent_name")),
+        _str(r.get("latitude")),
+        _str(r.get("longitude")),
+        _int_d(r.get("is_new_customer"), 0),
+        _int_d(r.get("is_new_product"), 0),
+        _str(r.get("raw_cust_name")),
+        _str(r.get("raw_address")),
+        _str(r.get("raw_city")),
+        _str(r.get("raw_state")),
+        _str(r.get("raw_postal_code")),
+        _str(r.get("raw_country")),
+        _str(r.get("unique_key_all_fields")),
+        _dt(r.get("updated_at")) or datetime.utcnow(),  # new — non-nullable (version col)
+    ]
+
+
+def _coerce_quotes(r: dict) -> list:
+    return [
+        _int(r.get("id")),
+        _int_d(r.get("system_id"), 0),          # non-nullable (ORDER BY key)
+        _int_d(r.get("system_unique_id"), 0),   # new — non-nullable (ORDER BY key)
+        _str_d(r.get("system_name")),
+        _str_d(r.get("company_type")),           # non-nullable (ORDER BY key)
+        _int_d(r.get("cddb_unique_id"), 0),
+        _int_d(r.get("distributor_id"), 0),
+        _str(r.get("cddb_manager_name")),
+        _str(r.get("cddb_manager_email")),
+        _int_d(r.get("rid"), 0),
+        _int(r.get("luid")),
+        _int(r.get("uid")),
+        _str(r.get("address")),
+        _int(r.get("assign_value")),
+        _int(r.get("brand")),
+        _str(r.get("can_post")),
+        _str(r.get("city")),
+        _str(r.get("close_date")),
+        _str(r.get("company")),
+        _str(r.get("contact_email")),
+        _str(r.get("contact_name")),
+        _str(r.get("contact_phone")),
+        _str(r.get("country")),
+        _str(r.get("county")),
+        _str(r.get("crm_id")),
+        _int(r.get("current_id")),
+        _str(r.get("demo")),
+        _str(r.get("description")),
+        _str(r.get("distributed_date")),
+        _str(r.get("estimated_close_date")),
+        _str(r.get("extra_json")),
+        _str(r.get("first_opend_date_time")),
+        _str(r.get("first_post_date_time")),
+        _str(r.get("forward_by_rid")),
+        _str(r.get("forward_to")),
+        _str(r.get("forword_id")),
+        _str(r.get("last_follow_up_date")),
+        _str(r.get("last_opend_date_time")),
+        _str(r.get("last_post_quote_date_time")),
+        _str(r.get("latitude")),
+        _str(r.get("line_item_json")),
+        _str(r.get("longitude")),
+        _str(r.get("order_amount")),
+        _str(r.get("other_reason")),
+        _str(r.get("pdf")),
+        _str(r.get("posted_comments")),
+        _str(r.get("quantity")),
+        _str(r.get("quote_creator")),
+        _str(r.get("quote_date")),
+        _str(r.get("quote_hash_key")),
+        _str(r.get("quote_last_mail_sent_date")),
+        _str(r.get("quote_luid")),
+        _str(r.get("quote_mail_sent")),
+        _str(r.get("quote_mail_sent_date")),
+        _str(r.get("quote_number")),
+        _str(r.get("quote_price")),
+        _dt(r.get("quote_sent_date_time")),
+        _str(r.get("quote_status")),
+        _str(r.get("quote_type")),
+        _dt(r.get("quote_upload_date")),
+        _str(r.get("quoted_sales_rep")),
+        _str(r.get("received_date_time")),
+        _str(r.get("referral_email")),
+        _str(r.get("referral_manager")),
+        _str(r.get("region")),
+        _int(r.get("reminder_cnt")),
+        _str(r.get("reminder_date")),
+        _str(r.get("reminder_days")),
+        _str(r.get("reminder_last_sent_date")),
+        _str(r.get("send_quote_date_time")),
+        _str(r.get("send_to")),
+        _str(r.get("state")),
+        _int_d(r.get("status"), 0),
+        _str(r.get("sub_reason")),
+        _int(r.get("sub_status_id")),
+        _str(r.get("website")),
+        _str(r.get("zip_code")),
+        _str(r.get("assigned_manager_name")),
+        _str(r.get("brandname")),
+        _str(r.get("status_name")),
+        _str(r.get("sub_status")),
+        _str(r.get("view_time")),
+        _str(r.get("post_time")),
+        _str(r.get("close_time")),
+        _dt(r.get("updated_at")) or datetime.utcnow(),  # new — non-nullable (version col)
+    ]
+
+
+def _coerce_inventory(r: dict) -> list:
+    return [
+        _int(r.get("id")),
+        _int_d(r.get("system_id"), 0),          # non-nullable (ORDER BY key)
+        _int_d(r.get("system_unique_id"), 0),   # new — non-nullable (ORDER BY key)
+        _str(r.get("system_name")),
+        _str_d(r.get("company_type")),           # non-nullable (ORDER BY key)
+        _int(r.get("distributor_id")),
+        _int(r.get("cddb_unique_id")),
+        _int(r.get("uid")),
+        _str(r.get("assigned_manager_name")),
+        _int(r.get("brand_id")),
+        _str(r.get("brand_name")),
+        _int(r.get("partnumber_id")),
+        _str(r.get("product_name")),
+        _str(r.get("product_desc")),
+        _str(r.get("prod_category_1")),
+        _str(r.get("prod_category_2")),
+        _str(r.get("prod_category_3")),
+        _str(r.get("prod_category_4")),
+        _int_d(r.get("p1"), 0),
+        _int_d(r.get("p2"), 0),
+        _int_d(r.get("p3"), 0),
+        _int_d(r.get("p4"), 0),
+        _int(r.get("branch")),
+        _dt(r.get("date")),
+        _int(r.get("quantity")),
+        _float(r.get("unit_cost")),
+        _str(r.get("uom")),
+        _str(r.get("part_url")),
+        _dt(r.get("date_received")),
+        _int_d(r.get("batch_id"), 0),
+        _str(r.get("unique_key")),
+        _dt(r.get("uploaded_date_time")),
+        _str(r.get("csvname")),
+        _int(r.get("temp_qty")),
+        _float(r.get("total_sales")),
+        _float(r.get("total_cost")),
+        _float(r.get("total_qty")),
+        _int(r.get("no_of_cust")),
+        _float(r.get("turns")),
+        _int(r.get("key_cust")),
+        _str(r.get("dist_acc_number")),
+        _int(r.get("safetyRatio")),
+        _float(r.get("manual_lead_time")) if r.get("manual_lead_time") is not None else 14.0,
+        _dt(r.get("updated_at")) or datetime.utcnow(),  # new — non-nullable (version col)
+    ]
 
 
 def _coerce_distributor_rep(r: dict) -> list:
     return [
         _int(r.get("id")),
         _int(r.get("system_id")),
-        _int(r.get("system_unique_id")),   # already renamed via field_map
+        _int(r.get("system_unique_id")),
         _str(r.get("company_type")),
         _str(r.get("dist_or_rep")),
         _str(r.get("system_name")),
@@ -205,15 +641,35 @@ def _coerce_distributor_rep(r: dict) -> list:
         _dt(r.get("updated_at")),
     ]
 
+
 # ---------------------------------------------------------------------------
-# PIPELINES registry — add new tables here
+# PIPELINES registry
 # ---------------------------------------------------------------------------
 
 PIPELINES: dict[str, dict] = {
 
-    "companies_systemwise": {
-        "clickhouse_table": "companies_by_system",
-        "field_map": {},   # names are identical between MySQL and ClickHouse
+    "companies": {
+        "clickhouse_table": "pdb_companies",
+        "field_map": {},
+        "columns": [
+            "id", "record_hash", "record_hash2", "record_hash3", "company_type",
+            "name", "duns", "address", "phone_researched", "city", "state", "county",
+            "country", "postal_code", "parent_name", "web_address", "dnb_sales_value",
+            "dnb_trade_style", "sic", "naics", "latitude", "longitude", "line_of_business",
+            "no_of_employees", "google_cust_name", "google_address", "google_city",
+            "google_state", "google_country", "google_postal_code", "google_phone_researched",
+            "google_web_address", "last_updated", "last_updated_copy", "system_count",
+            "system_ids", "system_names", "services", "sic_desc", "naics_desc", "meta",
+            "total_sales", "total_cost", "in_cddb", "is_cddb_client", "interlynx_call_host",
+            "interlynx_rep", "interlynx_am", "interlynx_company_type", "searched_on_google",
+            "is_active", "last_record_status", "is_appended", "meta_data",
+        ],
+        "coerce": _coerce_pdb_companies,
+    },
+
+    "companies_by_system": {
+        "clickhouse_table": "pdb_companies_systemwise",
+        "field_map": {},
         "columns": [
             "id", "is_dedupe_global", "dedupe_global_connect_id",
             "dupe_global_total_cost", "dupe_global_total_sales", "duns_global_count",
@@ -239,29 +695,140 @@ PIPELINES: dict[str, dict] = {
             "sync_data_to_system_flag", "meta", "total_records",
             "total", "total_quote_value", "total_sale_value", "total_cost_value",
         ],
-        "coerce": _coerce_companies,
+        "coerce": _coerce_companies_systemwise,
     },
 
-    "contacts": {
-        "clickhouse_table": "contacts_by_system",
-        "field_map": {
-            "cust_name":  "customer_name",   # rename kafka field → clickhouse column
-            "cust_email": "email",
-        },
+    "notes": {
+        "clickhouse_table": "pdb_notes",
+        "field_map": {},
         "columns": [
-            "id", "contact_id", "system_id", "customer_name", "email",
-            "phone", "city", "state", "country", "last_updated", "date_added",
+            "id", "services", "notes", "contacts", "company_id", "note_date",
+            "submitted_by", "note_category", "tagged_systems", "tagged_note_category",
+            "note_rating", "note_feedback_comment", "followup_note_id",
+            "followup_note_category", "followup_note_category_type",
+            "followup_note_category_conference", "followup_note_category_referral",
         ],
-        "coerce": _coerce_contacts,
+        "coerce": _coerce_notes,
     },
 
-    
+    "leads": {
+        "clickhouse_table": "pdb_leads",
+        "field_map": {},
+        "columns": [
+            "id", "system_id", "system_unique_id", "system_name", "company_type",
+            "distributor_id", "rid", "uid",
+            "cddb_unique_id", "cddb_manager_name", "cddb_manager_email", "luid", "status",
+            "send_to_name", "send_to", "lead_type", "lead_type_show", "distributed_date",
+            "county", "city", "state", "zip_code", "country", "region",
+            "lead_source1", "lead_source2", "lead_source3", "lead_source4",
+            "brand", "assigned_brand", "product", "assigned_product", "market",
+            "assigned_market", "current_id", "closed_date", "closedate_mid", "forward_to",
+            "forword_id", "forward_by_rid", "forward_by_uid", "order_amount", "order_desc",
+            "post_reminder_date", "reminder_days", "reminder_cnt", "reminder_date",
+            "reminder_last_sent_date", "reminder_desc", "other_value", "no_pot_value",
+            "lead_person_name", "forwarded_comments", "posted_comments", "open_reason",
+            "lead_source_repr", "review_interlynx", "mscode", "stprod_code", "browser_name",
+            "browser_version", "browser_platform", "server_ip", "system_ip", "mobile_posted",
+            "quoted_amount", "lead_date_time", "existing_customer", "new_costomer",
+            "cust_type_other", "no_pot_competitor", "old_uid", "old_send_to",
+            "received_date_time", "dont_know", "good_lead_value", "unable_to_reach_value",
+            "not_my_lead_value", "not_mine_brand", "other_reason", "posted_reason",
+            "annual_potential", "sic", "naics", "supplier_sent", "auto_sent",
+            "send_lead_date_time", "first_post_date_time", "last_post_lead_date_time",
+            "first_opend_date_time", "last_opend_date_time", "last_forward_lead_date_time",
+            "uploaded_from", "direct_account", "forwarded_date", "remind_me_date_time",
+            "lead_hash_key", "can_post", "demo_lead", "old_id", "csr_id", "flash_report",
+            "tm_id", "sub_status_id", "mql_lead", "time_to_view", "time_to_close",
+            "time_to_first_post", "brandname", "product_name", "market_name",
+            "internal_market", "internal_sub_market", "sic_name", "sic_root", "sic_root_name",
+            "sic_group", "sic_group_name", "naics_name", "naics_root", "naics_root_name",
+            "naics_group", "naics_group_name", "status_name", "sub_status", "sources",
+            "business_name", "address", "contact", "email", "webaddr", "phone",
+            "phone_researched", "lat", "lon", "assigned_manager_name", "customer_type",
+            "lead_comments", "posted_comments_2", "forwarded_date_2", "lead_date",
+            "order_amount_2", "quote_amount", "lead_hash", "created_at", "updated_at",
+        ],
+        "coerce": _coerce_leads,
+    },
+
+    "sales": {
+        "clickhouse_table": "pdb_pos_sales",
+        "field_map": {},
+        "columns": [
+            "id", "company_type", "system_id", "system_unique_id", "system_name",
+            "uid", "distributor_id", "temp_distributor_id", "cust_unique_key",
+            "cddb_unique_id", "cddb_manager_name", "cddb_manager_email",
+            "dist_account_number", "invoice_number", "invoice_date", "cust_account_number",
+            "quantity", "total_sales_value", "total_cost_value", "part_number_actual",
+            "year", "month", "part_number",
+            "toplevel_family_1", "toplevel_family_2", "toplevel_family_3", "toplevel_family_4",
+            "product_id", "brand", "part_number_submitted", "branch", "sic", "naics",
+            "country", "region", "pos_batch_id", "date_upload", "is_rebated", "date_recieved",
+            "cust_duns_id", "unit_cost", "unit_resale", "provided_customer_nbr",
+            "sales_unique_key", "fix", "part_updated_date", "sales_rep", "csv_name", "uom",
+            "match_criteria", "ship_to_commission", "ship_to_unit_price", "ship_to_unit_cost",
+            "ship_to_pct", "unit_cost_original", "quantity_original", "prod_group",
+            "territory_number", "tmid", "brand_name", "product_name", "sic_name", "naics_name",
+            "sic_group", "sic_root", "naics_group", "naics_root", "sic_text", "sic_market_name",
+            "sic_root_name", "naics_text", "naics_market_name", "naics_root_name",
+            "assigned_manager_company", "assigned_manager_name", "customer_name", "address1",
+            "city", "state", "county", "zip", "phone", "web_address", "line_of_business",
+            "parent_name", "latitude", "longitude", "is_new_customer", "is_new_product",
+            "raw_cust_name", "raw_address", "raw_city", "raw_state", "raw_postal_code",
+            "raw_country", "unique_key_all_fields", "updated_at",
+        ],
+        "coerce": _coerce_pos_sales,
+    },
+
+    "quotes": {
+        "clickhouse_table": "pdb_quotes",
+        "field_map": {},
+        "columns": [
+            "id", "system_id", "system_unique_id", "system_name", "company_type",
+            "cddb_unique_id", "distributor_id", "cddb_manager_name", "cddb_manager_email",
+            "rid", "luid", "uid", "address", "assign_value", "brand", "can_post", "city",
+            "close_date", "company", "contact_email", "contact_name", "contact_phone",
+            "country", "county", "crm_id", "current_id", "demo", "description",
+            "distributed_date", "estimated_close_date", "extra_json", "first_opend_date_time",
+            "first_post_date_time", "forward_by_rid", "forward_to", "forword_id",
+            "last_follow_up_date", "last_opend_date_time", "last_post_quote_date_time",
+            "latitude", "line_item_json", "longitude", "order_amount", "other_reason",
+            "pdf", "posted_comments", "quantity", "quote_creator", "quote_date",
+            "quote_hash_key", "quote_last_mail_sent_date", "quote_luid", "quote_mail_sent",
+            "quote_mail_sent_date", "quote_number", "quote_price", "quote_sent_date_time",
+            "quote_status", "quote_type", "quote_upload_date", "quoted_sales_rep",
+            "received_date_time", "referral_email", "referral_manager", "region",
+            "reminder_cnt", "reminder_date", "reminder_days", "reminder_last_sent_date",
+            "send_quote_date_time", "send_to", "state", "status", "sub_reason",
+            "sub_status_id", "website", "zip_code", "assigned_manager_name", "brandname",
+            "status_name", "sub_status", "view_time", "post_time", "close_time", "updated_at",
+        ],
+        "coerce": _coerce_quotes,
+    },
+
+    "inventories": {
+        "clickhouse_table": "pdb_inventory",
+        "field_map": {},
+        "columns": [
+            "id", "system_id", "system_unique_id", "system_name", "company_type",
+            "distributor_id", "cddb_unique_id", "uid", "assigned_manager_name",
+            "brand_id", "brand_name", "partnumber_id", "product_name", "product_desc",
+            "prod_category_1", "prod_category_2", "prod_category_3", "prod_category_4",
+            "p1", "p2", "p3", "p4", "branch", "date", "quantity", "unit_cost", "uom",
+            "part_url", "date_received", "batch_id", "unique_key", "uploaded_date_time",
+            "csvname", "temp_qty", "total_sales", "total_cost", "total_qty", "no_of_cust",
+            "turns", "key_cust", "dist_acc_number", "safetyRatio", "manual_lead_time",
+            "updated_at",
+        ],
+        "coerce": _coerce_inventory,
+    },
+
     "distributors": {
         "clickhouse_table": "distributors",
         "field_map": {},
         "columns": [
-            "id", "system_id", "system_unique_id", "company_type","dist_or_rep",
-            "system_name", "name", "email", "account_number","is_rep",
+            "id", "system_id", "system_unique_id", "company_type", "dist_or_rep",
+            "system_name", "name", "email", "account_number", "is_rep",
             "created_at", "updated_at",
         ],
         "coerce": _coerce_distributor_rep,
